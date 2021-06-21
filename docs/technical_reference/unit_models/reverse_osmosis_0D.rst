@@ -44,7 +44,7 @@ Sets
    "Phases", ":math:`p`", "['Liq']"
    "Components", ":math:`j`", "['H2O', 'NaCl']*"
 
-*Solute depends on the imported property model; example shown here is for the NaCl property model.
+*Solute depends on the imported property model; example shown here is for the NaCl property model.*
 
 Variables
 ----------
@@ -67,8 +67,8 @@ The following variables are only built when specific configuration key-value pai
 
 if ``has_pressure_change`` is set to ``True``:
 
-.. csv-table::
-   :header: "Description", "Symbol", "Variable Name", "Index", "Units"
+.. .. csv-table::
+..   :header: "Description", "Equation"
 
    "Pressure drop", ":math:`ΔP`", "deltaP", "[t]", ":math:`\text{Pa}`"
 

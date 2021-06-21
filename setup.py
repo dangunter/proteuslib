@@ -78,12 +78,13 @@ setup(
         # primary requirements for unit and property models
         "idaes-pse",
         "pyomo",  # (also needed for units in electrolyte database (edb))
-        # the following requirements are for the edb
+        # the following requirements are for the electrolyte database (edb)
         "pymongo>3",  # database interface
         "fastjsonschema",  # schema validation
-        # other requirements
-        "pytest",  # technically developer, but everyone likes tests
-        "pytest-cov", # technically developer, but everyone likes tests
+        "click",  # command-line tools with Click
+        "json-schema-for-humans",  # pretty JSON schema in HTML/Markdown
+        "myst-parser",  # markdown support for Sphinx
+        "linkify-it-py",
         # tutorial tests
         "nbformat",
     ],
@@ -94,11 +95,20 @@ setup(
             "nbsphinx", # docs - convert Jupyter notebooks
             "json-schema-for-humans",  # pretty JSON schema in HTML
             "black",  # code formatting
+            # other requirements
+            "pytest",  # test framework
+            "pytest-cov",  # code coverage
         ],
     },
     package_data={  # Optional
         "": [
             "*.json",
         ],
+    },
+    entry_points={
+        # add edb CLI commands
+        "console_scripts": [
+            "edb = proteuslib.edb.commands:command_base",
+        ]
     },
 )
