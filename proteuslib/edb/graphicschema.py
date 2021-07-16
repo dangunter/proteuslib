@@ -18,7 +18,7 @@ type_ = pp.Forward()
 field = pp.Group(defflag + field_name + "<" + type_ + ">" + reqflag)
 obj = "(" + pp.OneOrMore(field) + ")"
 array = "[" + scalars + "]"
-type_ <<= (obj | array | scalars)
+type_ <<= obj | array | scalars
 
 schema = pp.OneOrMore(field)
 schema.ignore(block_comment)
@@ -90,10 +90,86 @@ component<(
 )>
 """
 
+
+class Union:
+    def __init__(self, *args):
+        self._types = self._flatten(args)
+
+    def __str__(self):
+        return "|".join([str(t) for t in self._types])
+
+    __repr__ = __str__
+
+    @staticmethod
+    def _flatten(a):
+        result = []
+        for item in a:
+            if isinstance(item, Union):
+                result.extend(item._types)
+            else:
+                result.append(item)
+        return result
+
+
+class ScalarMeta(type):
+
+    def __ror__(self, other):
+        if issubclass(other, type):
+            other = other()
+        return Union(self(), other)
+
+
+class Scalar(metaclass=ScalarMeta):
+    def __init__(self, desc=None, enum=None):
+        self._desc = desc
+        self._enum = enum
+
+    def __str__(self):
+        return self.__class__.__name__.lower()
+
+    def __ror__(self, other):
+        return Union(self, other)
+
+
+class String(Scalar):
+    pass
+
+
+class Number(Scalar):
+    pass
+
+
+param = {
+    "v": Number,
+    "u": String,
+    "i": Number | String
+}
+
+dict_component = {
+    "component": {
+        "name": String("cool"),
+        "elements": [String],
+        "valid_phase_types": [String],
+        "type": String(["solvent", "solute"]),
+        "phase_equilibrium_form": {"Vap": String, "Liq": String},
+        "parameter_data": {
+            "mw": param,
+            "pressure_crit": param,
+            "/.*_coeff/": param,
+            "/.*_ref/": param,
+        },
+    }
+}
+
+def show_dict():
+    pprint(dict_component)
+
 def parse():
     print("parsing example..")
     result = schema.parseString(example1)
     return result
+
+
 #    for item in result:
 #        print(f"@@ {''.join(item[0])}")
-    #print(result.dump())
+# print(result.dump())
