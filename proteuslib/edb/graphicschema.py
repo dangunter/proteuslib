@@ -1,104 +1,30 @@
-import pyparsing as pp
 from pprint import pprint
-import textwrap
-
-block_comment = pp.QuotedString(quoteChar="/*", endQuoteChar="*/")
-reqflag = pp.Optional("*")
-defflag = pp.Optional("!")
-
-enum_value = pp.Word(pp.alphanums + "-_/!@#$%^&*:,.~")  # printables besides ";"
-enum_values = pp.delimitedList(enum_value, delim=";")
-enum_ = pp.nestedExpr("{", "}", content=enum_values)
-type_name = pp.Word(pp.alphas)
-scalar = type_name + pp.Optional(enum_)
-scalars = pp.delimitedList(scalar, delim="|")
-
-field_name = pp.Word(pp.alphas, pp.alphanums + "_") | pp.QuotedString(quoteChar="/")
-type_ = pp.Forward()
-field = pp.Group(defflag + field_name + "<" + type_ + ">" + reqflag)
-obj = "(" + pp.OneOrMore(field) + ")"
-array = "[" + scalars + "]"
-type_ <<= obj | array | scalars
-
-schema = pp.OneOrMore(field)
-schema.ignore(block_comment)
 
 
-"""
-/* A chemical species that is a component in a reaction */
-"""
+class Describable:
+    def __init__(self, desc=""):
+        self.desc = desc
 
-example1 = """
-/* List of parameter values */
-!param<(
-  v<number>        /* Chemical name of the component */
-  u<string>        /* Name of an individual element */
-  i<number|string> /* Component type */
-)>
-
-component<(
-  name<string>*
-  elements<[string]>*
-  type<string{solvent;solute;anion;cation;Solvent;Solute;Anion;Cation}>
-  valid_phase_types<[string]>
-  phase_equilibrium_form<(Vap<str> Liq<str>)>
-  parameter_data<(
-    mw<param>
-    pressure_crit<param>
-    /.*_coeff/<param>
-    /.*_ref/<param>
-  )>
-)>
-"""
-
-example2 = """
-component <( 
-    name<str>*              'Component name
-    elements<[string]>*     'Name of an individual element
-    /.*_coeff/<param>
-)>
-
-!param<(
-  v<number>        'Chemical name of the component
-  u<string>        'Name of an individual element
-  i<number|string> 'Component type
-)>
-
-"""
-
-enum_example = """
-enum <(
-type<string{solvent;solute;anion;cation;Solvent;Solute;Anion;Cation}>
-)>
-"""
+    def __floordiv__(self, other):
+        """Add a comment to a scalar.
+        """
+        self.desc = str(other)
+        return self
 
 
-example_component = """
-/* THis is a comment */
-component<(
-  name<str>* /* cool */
-  elements<[string]>*
-  valid_phase_types<[string]>
-  type<string{solvent;solute;anion;cation;Solvent;Solute;Anion;Cation}>
-  phase_equilibrium_form<(Vap<str> Liq<str>)>
-  parameter_data<(
-    mw<param>
-    pressure_crit<param>
-    /.*_coeff/<param>
-    /.*_ref/<param>
-  )>
-)>
-"""
+class Union(Describable):
 
-
-class Union:
     def __init__(self, *args):
         self._types = self._flatten(args)
+        super().__init__()
 
-    def __str__(self):
-        return "|".join([str(t) for t in self._types])
-
-    __repr__ = __str__
+    def __repr__(self):
+        type_list = "|".join([str(t) for t in self._types])
+        if self.desc:
+            s = f"{type_list} /* {self.desc} */"
+            return s
+        else:
+            return type_list
 
     @staticmethod
     def _flatten(a):
@@ -112,64 +38,85 @@ class Union:
 
 
 class ScalarMeta(type):
-
-    def __ror__(self, other):
+    """Allow bare class to be used like an instance of a subclass.
+    """
+    def __or__(cls, other):
+        """Allow for `<ScalarSubclass> | <OtherScalarSubclass> | ..`
+        """
         if issubclass(other, type):
             other = other()
-        return Union(self(), other)
+        return Union(cls(), other)
+
+    def __floordiv__(cls, other):
+        """Add a comment to a scalar.
+        """
+        inst = cls()
+        inst.desc = other
+        return inst
+
+    def __repr__(cls):
+        return repr(cls())
 
 
-class Scalar(metaclass=ScalarMeta):
-    def __init__(self, desc=None, enum=None):
-        self._desc = desc
-        self._enum = enum
+class Scalar(Describable, metaclass=ScalarMeta):
+    def __init__(self, *enum_values):
+        self._enum = enum_values
+        super().__init__()
 
-    def __str__(self):
-        return self.__class__.__name__.lower()
+    def __repr__(self):
+        type_name = self.__class__.type_name
+        enum_str, desc_str = "", ""
+        if self._enum:
+            values = ";".join(self._enum)
+            type_name += f"<{values}>"
+        if self.desc:
+            return f"{type_name} /* {self.desc} */"
+        else:
+            return type_name
 
-    def __ror__(self, other):
+    def __or__(self, other):
+        """Make a choice of scalars.
+        """
         return Union(self, other)
 
 
 class String(Scalar):
-    pass
+    type_name = "string"
 
 
 class Number(Scalar):
-    pass
+    type_name = "number"
 
 
-param = {
-    "v": Number,
-    "u": String,
-    "i": Number | String
-}
-
-dict_component = {
-    "component": {
-        "name": String("cool"),
-        "elements": [String],
-        "valid_phase_types": [String],
-        "type": String(["solvent", "solute"]),
-        "phase_equilibrium_form": {"Vap": String, "Liq": String},
-        "parameter_data": {
-            "mw": param,
-            "pressure_crit": param,
-            "/.*_coeff/": param,
-            "/.*_ref/": param,
-        },
+def complex():
+    param = {
+        "v": Number // "Chemical name of the component",
+        "u": String // "Units",
+        "i": (Number | String) // "Index"
     }
-}
 
-def show_dict():
-    pprint(dict_component)
+    component = {
+        "component": {
+            "name": String // "Component name",
+            "elements": [String // "Name of an individual element"],
+            "valid_phase_types": [String("Liq", "Vap")],
+            "type": String("solvent", "solute") // "Type of thing",
+            "phase_equilibrium_form": {"Vap": String, "Liq": String},
+            "parameter_data": {
+                "mw": param,
+                "pressure_crit": param,
+                "/.*_coeff/": param,
+                "/.*_ref/": param,
+            },
+        }
+    }
+    return param, component
 
-def parse():
-    print("parsing example..")
-    result = schema.parseString(example1)
-    return result
+
+x = {"foo": [String, "this is a foo"]}
 
 
-#    for item in result:
-#        print(f"@@ {''.join(item[0])}")
-# print(result.dump())
+if __name__ == "__main__":
+    pprint(x)
+    param, component = complex()
+    pprint(component)
