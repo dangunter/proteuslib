@@ -261,39 +261,37 @@ class SetPort(Command):
 
 
 class SetInlet(SetPort):
-    """An inlet is a port with the name 'inlet'."""
+    """An inlet is a port with the name 'inlet'.
+    """
 
     name = "inlet"
     desc = "Set an inlet parameter"
 
 
 class SetOutlet(SetPort):
-    """An outlet is a port with the name 'outlet'."""
+    """An outlet is a port with the name 'outlet'.
+    """
 
     name = "outlet"
     desc = "Set an outlet parameter"
 
 
-class SetPortFlowPhase(SetPort):
-    """Set mass flow rate on a port for a given component and phase.
+class SetPortFlow(SetPort):
 
-    Base class for SetPortFlowPhaseVap and SetPortFlowPhaseLiq. Use one of
-    these as the actual command.
-    """
-    def __init__(self, *args, phase=None):
-        super().__init__(*args)
-        self._phase = phase
+    name = "flow"
+    desc = "Set flow rate for an inlet or outlet"
 
-    def _execute(self, args):
-        if len(args) != 2:
-            self.syntax_error(args, f"Wrong arguments for "
-                                    f"'set {self._state.set_what} flow'")
-        flow_type, comp_name = args[0], args[1]
-        attr = f"flow_{flow_type}_phase_comp"
-        phase = self._phase
-        index = (0, phase, comp_name)
-        self._set_indexed_value(attr, index, args)
-        self._report = ("fix", self._state.set_what, "flow", flow_type, comp_name,
+
+class SetPortFlowMassPhase(SetPort):
+    """Shared functionality for SetPortFLowMass<Liq,Vap> subclasses."""
+    def _execute_phase(self, args, phase):
+        if len(args) < 1:
+            self.syntax_error(args, "Missing <component> name")
+        elif len(args) > 1:
+            self.syntax_error(args, "Extra arguments after <component> name")
+        comp = args[0]
+        self._set_indexed_value("flow_mass_phase_comp", (0, phase, comp), args)
+        self._report = ("fix", self._state.set_what, "flow", f"mass ({phase})", comp,
                         f"<- {self._state.set_val}")
 
     def help(self):
@@ -301,25 +299,26 @@ class SetPortFlowPhase(SetPort):
         """
         what = self._state.set_what
         return [self.desc,
-                f"Syntax: set {what} flow <type> <component> value",
-                f"  <type> = 'mass' or 'vol'",
+                f"Syntax: set {what} flow mass <component> value",
                 f"  <component> = chemical formula like 'NaCl' or 'H2O'"]
 
 
-class SetPortFlowLiqPhase(SetPortFlowPhase):
-    name = "flow"
-    desc = "Set the flow rate for the liquid phase"
+class SetPortFlowMassLiq(SetPortFlowMassPhase):
 
-    def __init__(self, *args):
-        super().__init__(*args, phase="Liq")
+    name = "mass"
+    desc = "Set mass flow rate for liquid phase at an inlet or outlet"
+
+    def _execute(self, args):
+        return self._execute_phase(args, "Liq")
 
 
-class SetPortFlowVapPhase(SetPortFlowPhase):
-    name = "flow"
-    desc = "Set the mass flow rate for the vapor phase"
+class SetPortFlowMassVap(SetPortFlowMassPhase):
 
-    def __init__(self, *args):
-        super().__init__(*args, phase="Vap")
+    name = "mass"
+    desc = "Set mass flow rate for vapor phase at an inlet or outlet"
+
+    def _execute(self, args):
+        return self._execute_phase(args, "Vap")
 
 
 class SetPortFlowScalar(SetPort):
@@ -340,6 +339,64 @@ class SetPortFlowPressure(SetPortFlowScalar):
 class SetPortFlowTemperature(SetPortFlowScalar):
     name = "temperature"
     desc = "Set the flow temperature"
+
+
+class SetPermeate(Command):
+    name = "permeate"
+    desc = "Set properties for the permeate"
+
+
+class SetPermeateScalar(Command):
+    """Base class for setting simple scalar values.
+    Use a subclass for the command.
+    """
+    def _execute(self, args):
+        prop = getattr(self._state.unit, self.name)[0]
+        prop.fix(self._state.set_val)
+        self._report = ("fix", "permeate", attr, f"<- {self._state.set_val}")
+
+    def help(self):
+        return [self.desc, f"Syntax: set permeate {self.name} <value>"]
+
+
+class SetPermeatePressure(SetPermeateScalar):
+    name = "pressure"
+    desc = "Set the permeate pressure"
+
+
+class SetMembrane(Command):
+    name = "membrane"
+    desc = "Set properties for the membrane"
+
+
+class SetMembraneArea(Command):
+    name = "area"
+    desc = "Set membrane area (m^2)"
+
+    def _execute(self, args):
+        self._state.unit.area.fix(self._state.set_val)
+        _report = ("fix membrane area", f"<- {self._state.set_val}")
+
+
+class SetMembranePermeability(Command):
+    name = "permeability"
+    desc = "Set membrance permeability for a given component"
+
+    def _execute(self, args):
+        try:
+            permeate = args[0].lower()
+        except IndexError:
+            self.syntax_error(args, "Missing name of permeate, 'water' or 'salt'")
+        try:
+            comp = {"water": "A", "salt": "B"}[permeate]
+        except KeyError:
+            self.syntax_error(args, "Wrong name of permeate, 'water' or 'salt'")
+        getattr(self._state.unit, f"{comp}_comp").fix(self._state.set_val)
+        _report = ("fix", "membrane", permeate, "permeability",
+                   f"<- {self._state.set_val}")
+
+    def help(self):
+        return [self.desc, "Syntax: set membrane permeability (water|salt) <value>"]
 
 
 class RO0DUnit(Command):
@@ -365,11 +422,13 @@ class RO0DUnit(Command):
         # create a 'set inlet' parent command
         inlet_cmd = set_cmd.add_command(SetInlet)
         # add: set inlet flow ...
-        inlet_cmd.add_command(SetPortFlowLiqPhase)
+        inlet_cmd.add_command(SetPortFlow).add_command(SetPortFlowMassLiq)
         inlet_cmd.add_command(SetPortFlowPressure)
         inlet_cmd.add_command(SetPortFlowTemperature)
-        # add: set inlet permeate ...
-        # etc.
+        set_cmd.add_command(SetPermeate).add_command(SetPermeatePressure)
+        mbr_cmd = set_cmd.add_command(SetMembrane)
+        mbr_cmd.add_command(SetMembraneArea)
+        mbr_cmd.add_command(SetMembranePermeability)
 
         self._report = ("unit", "RO-0D")
 
