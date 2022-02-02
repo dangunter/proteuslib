@@ -1,8 +1,10 @@
 """
 Interpreter for DSL
 """
+import builtins
 import re
 from dataclasses import dataclass
+from IPython.core.magic import Magics, magics_class, cell_magic, line_magic
 
 #
 # Imports from Pyomo, including "value" for getting the
@@ -42,23 +44,262 @@ class DSLSyntaxError(Exception):
         self.message = msg
 
 
-def create_model():
-    m = ConcreteModel()
-    m.fs = FlowsheetBlock(default={"dynamic": False})
-    return m
-
-
-def display_help(lines):
-    """Display multi-line help message.
-    """
-    for line in lines:
-        print(line)
-
-
-_help_keyword = "?"
+def interpreter():
+    interp = Interpreter()
+    _add_standard_commands(interp)
+    return interp
 
 
 class Interpreter:
+    """A simple command interpreter driven by a set of patterns.
+
+    These are space-separated tokens. A 'bare' token represents what the user
+    must type in the command. A '$' prefix means a variable.
+
+      $name => String variable 'name'
+      $name:f => Numeric (floating-point) variable 'name'
+      $name:foo|bar => String variable 'name' that must take value 'foo' or 'bar'
+
+    Examples:
+
+        pattern: unit $type
+        input: unit ro-0d
+        func: def unit(t): ..
+        .
+        set port flow mass $phase:liq|vap $value:f
+    """
+    _VAR = "$"
+    # Get builtin keywords (lowercase, no dunders)
+    _BI = [s for s in dir(builtins) if not s[0] == "_" and s.lower() == s]
+    # Functions to parse different type codes
+    _PARSE_FN = {
+        "s": str,
+        "f": float,
+        "i": int,
+        "d": int
+    }
+
+    def __init__(self):
+        self._command_patterns = []
+        self._state = {"_interp": self}
+
+    def get_state(self, name):
+        return self._state.get(name, None)
+
+    def add_command(self, pattern, func):
+        tokens = self._tokenize(pattern)
+        # Get parse functions for the variables
+        variables = {}
+        for t in tokens:
+            if t.startswith(self._VAR):
+                var_name, parse_func = self._parse_variable(t)
+                variables[t] = (var_name, parse_func)
+        print(f"@@ variables for '{pattern}' => {variables}")
+        # Save the command
+        self._command_patterns.append((tokens, variables, func))
+
+    def run_commands(self, text):
+        for line in text.split("\n"):
+            line = line.strip()
+            if line:
+                self.run_command(line)
+
+    def run_command(self, line):
+        func, kwargs = self.match_command(line)
+        if func is None:
+            raise KeyError(f"Unknown command: '{line}'")
+        # invoke function
+        func(state=self._state, **kwargs)
+
+    def match_command(self, text):
+        tokens = self._tokenize(text)  # should be at least 1 token
+        if tokens[0] in ("#", "!"):
+            return self._comment, {}
+        kwargs = {}
+        for pattern_tokens, variables, func in self._command_patterns:
+            print(f"@@ pattern-tokens={pattern_tokens} tokens={tokens}")
+            if len(pattern_tokens) != len(tokens):
+                continue
+            success = True
+            for tt, pt in zip(tokens, pattern_tokens):
+                print(f"@@   tt={tt} pt={pt}")
+                # If a variable value is expected, parse it
+                if pt in variables:
+                    print("@@     is-variable")
+                    var_name, parse_func = variables[pt]
+                    try:
+                        var_value = parse_func(tt)
+                    except ValueError as err:
+                        success = False
+                        break
+                    # append a "_" to a built-in name like 'type'
+                    if var_name in self._BI:
+                        var_name = var_name + "_"
+                    kwargs[var_name] = var_value
+                # Otherwise, expect an exact match
+                elif tt.lower() != pt:
+                    success = False
+                    break
+            if success:  # match
+                return func, kwargs
+        return None, None  # no match
+
+    @staticmethod
+    def _tokenize(s):
+        return s.strip().split()
+
+    @classmethod
+    def _parse_variable(cls, pattern_token):
+        parts = pattern_token.split(":", 1)
+        # no type => string
+        if len(parts) == 1:
+            var_name = parts[0][1:]
+            return var_name, str
+        raw_var_name, var_type = parts
+        var_name = raw_var_name[1:].lower()  # strip leading variable-symbol
+        # if '|' in type => enum
+        if "|" in var_type:
+            allowed = var_type.split("|")
+
+            def fn(a):
+                def _fn(tok):
+                    if tok in a:
+                        return tok
+                    raise ValueError(f"Input '{tok}' not in: {','.join(a)}")
+                return _fn
+
+            return var_name, fn(allowed)
+        # otherwise lookup in class mapping
+        try:
+            var_parse_func = cls._PARSE_FN[var_type]
+        except KeyError:
+            raise ValueError(f"Unknown type code '{var_type}' in '{pattern_token}'")
+        return var_name, var_parse_func
+
+    @staticmethod
+    def _comment(state=None):
+        """No-op function for comments"""
+        return
+
+
+# set inlet flow mass NaCl 0.035
+# set inlet flow mass H2O 0.965
+# set inlet pressure 50e5
+# set inlet temperature 298.15
+# set membrane area 50
+# set membrane permeability water 4.2e-12
+# set membrane permeability salt 3.5e-8
+# set permeate pressure 101325
+
+def _add_standard_commands(interp):
+    cmd = StandardCommands
+    interp.add_command("init", cmd.create_model)
+    interp.add_command("unit ro-0d", cmd.ro_0d)
+
+
+class StandardCommands:
+
+    @staticmethod
+    def create_model(state=None):
+        m = ConcreteModel()
+        m.fs = FlowsheetBlock(default={"dynamic": False})
+        state["model"] = m
+
+    @staticmethod
+    def ro_0d(state=None):
+        m = state["model"]
+        # create the unit operation
+        m.fs.properties = NaClParameterBlock()
+        unit = ReverseOsmosis0D(
+            default={
+                "property_package": m.fs.properties,
+                "concentration_polarization_type": ConcentrationPolarizationType.none,
+                "mass_transfer_coefficient": MassTransferCoefficient.none,
+                "has_pressure_change": False,
+            }
+        )
+        m.fs.unit = unit
+        # add commands for this unit
+        RO0DCommands.add_all(state["_interp"])
+
+
+class RO0DCommands:
+
+    @classmethod
+    def add_all(cls, interp):
+        interp.add_command("set inlet flow $type:mass|mol $comp:NaCl|H2O $value:f",
+                           cls.inlet_flow_phase)
+        interp.add_command("set inlet pressure $value:f", cls.inlet_pressure)
+        interp.add_command("set inlet temperature $value:f", cls.inlet_temperature)
+
+    @staticmethod
+    def inlet_flow_phase(state=None, comp=None, value=None, type_=None):
+        m = state["model"]
+        phase = "Liq"
+        if type_ == "mass":
+            m.fs.unit.inlet.flow_mass_phase_comp[0, phase, comp].fix(value)
+        elif type_ == "mol":
+            m.fs.unit.inlet.flow_mol_phase_comp[0, phase, comp].fix(value)
+        # else: ??
+
+    @staticmethod
+    def inlet_pressure(state=None, value=None):
+        m = state["model"]
+        m.fs.unit.inlet.pressure[0].fix(value)
+
+    @staticmethod
+    def inlet_temperature(state=None, value=None):
+        m = state["model"]
+        m.fs.unit.inlet.temperature[0].fix(value)
+
+#################################################################
+
+
+g_interpreter = interpreter()
+
+
+def get_model():
+    return g_interpreter.get_state("model")
+
+
+def get_results():
+    return g_interpreter.get_state("results")
+
+
+@magics_class
+class IDAESInterpreter(Magics):
+    def __init__(self, shell):
+        super().__init__(shell)
+
+    @cell_magic
+    def iic(self, line, cell):
+        """IDAES domain-specific language for the cell."""
+        self._interpret(cell)
+
+    @line_magic
+    def ii(self, line):
+        self._interpret(line)
+
+    @staticmethod
+    def _interpret(text):
+        g_interpreter.run_commands(text)
+
+
+def load_ipython_extension(ipython):
+    """
+    Any module file that define a function named `load_ipython_extension`
+    can be loaded via `%load_ext module.path` or be configured to be
+    autoloaded by IPython at startup time.
+    """
+    # You can register the class itself without instantiating it.  IPython will
+    # call the default constructor on it.
+    ipython.register_magics(IDAESInterpreter)
+
+
+#####################################################################
+
+
+class OldInterpreter:
     def __init__(self):
         self._commands = {}
         self._model = create_model()
@@ -281,6 +522,10 @@ class SetPortFlow(SetPort):
     name = "flow"
     desc = "Set flow rate for an inlet or outlet"
 
+    def _execute(self, args):
+        """Override `SetPort._execute` to do nothing, instead."""
+        pass
+
 
 class SetPortFlowMassPhase(SetPort):
     """Shared functionality for SetPortFLowMass<Liq,Vap> subclasses."""
@@ -351,9 +596,9 @@ class SetPermeateScalar(Command):
     Use a subclass for the command.
     """
     def _execute(self, args):
-        prop = getattr(self._state.unit, self.name)[0]
+        prop = getattr(self._state.unit.permeate, self.name)[0]
         prop.fix(self._state.set_val)
-        self._report = ("fix", "permeate", attr, f"<- {self._state.set_val}")
+        self._report = ("fix", "permeate", self.name, f"<- {self._state.set_val}")
 
     def help(self):
         return [self.desc, f"Syntax: set permeate {self.name} <value>"]
@@ -375,7 +620,7 @@ class SetMembraneArea(Command):
 
     def _execute(self, args):
         self._state.unit.area.fix(self._state.set_val)
-        _report = ("fix membrane area", f"<- {self._state.set_val}")
+        self._report = ("fix membrane area", f"<- {self._state.set_val}")
 
 
 class SetMembranePermeability(Command):
@@ -392,8 +637,8 @@ class SetMembranePermeability(Command):
         except KeyError:
             self.syntax_error(args, "Wrong name of permeate, 'water' or 'salt'")
         getattr(self._state.unit, f"{comp}_comp").fix(self._state.set_val)
-        _report = ("fix", "membrane", permeate, "permeability",
-                   f"<- {self._state.set_val}")
+        self._report = ("fix", "membrane", permeate, "permeability",
+                        f"<- {self._state.set_val}")
 
     def help(self):
         return [self.desc, "Syntax: set membrane permeability (water|salt) <value>"]
@@ -431,9 +676,6 @@ class RO0DUnit(Command):
         mbr_cmd.add_command(SetMembranePermeability)
 
         self._report = ("unit", "RO-0D")
-
-
-g_interpreter = None
 
 
 def load_commands(interp):
@@ -700,49 +942,4 @@ class Action:
         return self._value is not None
 
 
-#####
-from IPython.core.magic import Magics, magics_class, cell_magic, line_magic
 
-g_state = {"model": None, "results": None}
-
-
-def get_model():
-    return g_state["model"]
-
-
-def get_results():
-    return g_state["results"]
-
-
-@magics_class
-class IDAESInterpreter(Magics):
-    def __init__(self, shell):
-        super().__init__(shell)
-
-    @cell_magic
-    def iic(self, line, cell):
-        """IDAES domain-specific language for the cell."""
-        self._interpret(cell)
-
-    @line_magic
-    def ii(self, line):
-        self._interpret(line)
-
-    @staticmethod
-    def _interpret(text):
-        global g_interpreter
-        if g_interpreter is None:
-            g_interpreter = Interpreter()
-            load_commands(g_interpreter)
-        g_interpreter.process(text)
-
-
-def load_ipython_extension(ipython):
-    """
-    Any module file that define a function named `load_ipython_extension`
-    can be loaded via `%load_ext module.path` or be configured to be
-    autoloaded by IPython at startup time.
-    """
-    # You can register the class itself without instantiating it.  IPython will
-    # call the default constructor on it.
-    ipython.register_magics(IDAESInterpreter)
