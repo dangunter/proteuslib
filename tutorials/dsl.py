@@ -35,9 +35,8 @@ from watertap.unit_models.reverse_osmosis_0D import (
 )
 
 
-def interpreter() -> 'Interpreter':
-    """Create and return a new interpreter instance.
-    """
+def interpreter() -> "Interpreter":
+    """Create and return a new interpreter instance."""
     interp = Interpreter()
     _add_standard_commands(interp)
     return interp
@@ -59,7 +58,7 @@ class Interpreter:
         input: unit ro-0d
         func: def unit(t): ..
         .
-        set port flow mass $phase:liq|vap $value:f
+        fix port flow mass $phase:liq|vap $value:f
     """
 
     _VAR = "$"
@@ -101,7 +100,7 @@ class Interpreter:
         if func is None:
             raise KeyError(f"Unknown command: '{line}'")
         # invoke function
-        print(f"Running: {line}")
+        # print(f"Running: {line}")
         func(state=self._state, **kwargs)
 
     def match_command(self, text):
@@ -228,81 +227,77 @@ class StandardCommands:
         state["results"] = solver.solve(m)
 
 
-class RO0DCommands:
-    """Support these commands for RO 0-D model.
+class UnitCommandBase:
+    @classmethod
+    def create_setter(cls, interp, target, func):
+        for cmd, values in (
+            ("fix", "$value:f"),
+            ("bounds", "$lb:f $ub:f"),
+            ("unfix", ""),
+        ):
+            interp.add_command(f"{cmd} {target} {values}", func)
 
-    * `set inlet flow $type:mass|mol $comp:NaCl|H2O $value:f`
-        * Example: `set inlet flow mass NaCl 0.035`
-        * Example: `set inlet flow mass H2O 0.965`
-    * `set inlet pressure $value:f`
-        * Example: `set inlet pressure 50e5`
-    * `set inlet temperature $value:f`
-        * Example: `set inlet temperature 298.15`
-    * `set membrane area $value:f`
-        * Example: `set membrane area 50`
-    * `set membrane permeability $comp:water|salt $value:f`
-        * Example: `set membrane permeability water 4.2e-12`
-        * Example: `set membrane permeability salt 3.5e-8`
-    * `set permeate pressure $value:f`
-        * Example: `set permeate pressure 101325`
-    * `scale flow $type:mass|mol $comp:NaCl|H2O $value:f`
-        * Example: `scale flow mass NaCl 1e2`
+    @staticmethod
+    def set_unit_prop(unit_prop, lb=None, ub=None, value=None):
+        if lb is not None:
+            unit_prop.unfix()
+            unit_prop.setlb(lb)
+            unit_prop.setub(ub)
+        elif value is not None:
+            unit_prop.fix(value)
+        else:
+            unit_prop.unfix()
+
+
+class RO0DCommands(UnitCommandBase):
+    """Add commands for RO 0-D model.
     """
 
     @classmethod
     def add_all(cls, interp):
-        interp.add_command(
-            "set inlet flow $type:mass|mol $comp:NaCl|H2O $value:f",
-            cls.inlet_flow_phase,
+        cls.create_setter(
+            interp,
+            "inlet flow $type:mass|mol $comp:NaCl|H2O",
+            cls.set_inlet_flow_phase,
         )
-        interp.add_command("set inlet pressure $value:f", cls.inlet_pressure)
-        interp.add_command("set inlet temperature $value:f", cls.inlet_temperature)
-        interp.add_command("set membrane area $value:f", cls.membrane_area)
-        interp.add_command(
-            "set membrane permeability $comp:water|salt $value:f", cls.membrane_perm
+        cls.create_setter(interp, "inlet $prop:pressure|temperature", cls.set_inlet)
+        cls.create_setter(interp, "membrane area", cls.set_membrane_area)
+        cls.create_setter(
+            interp, "membrane permeability $comp:water|salt", cls.set_membrane_perm
         )
-        interp.add_command("set permeate pressure $value:f", cls.perm_pressure)
+        cls.create_setter(interp, "permeate pressure $value:f", cls.set_perm_pressure)
         interp.add_command(
             "scale flow $type:mass|mol $comp:NaCl|H2O $value:f", cls.scale_flow
         )
 
-    @staticmethod
-    def inlet_flow_phase(state=None, comp=None, value=None, type_=None):
+    @classmethod
+    def set_inlet_flow_phase(cls, state=None, comp=None, type_=None, **kwargs):
         m = state["model"]
         phase = "Liq"
         if type_ == "mass":
-            m.fs.unit.inlet.flow_mass_phase_comp[0, phase, comp].fix(value)
+            p = m.fs.unit.inlet.flow_mass_phase_comp[0, phase, comp]
         elif type_ == "mol":
-            m.fs.unit.inlet.flow_mol_phase_comp[0, phase, comp].fix(value)
-        # else: ??
-
-    @staticmethod
-    def inlet_pressure(state=None, value=None):
-        m = state["model"]
-        m.fs.unit.inlet.pressure[0].fix(value)
-
-    @staticmethod
-    def inlet_temperature(state=None, value=None):
-        m = state["model"]
-        m.fs.unit.inlet.temperature[0].fix(value)
-
-    @staticmethod
-    def membrane_area(state=None, value=None):
-        m = state["model"]
-        m.fs.unit.area.fix(value)
-
-    @staticmethod
-    def membrane_perm(state=None, comp=None, value=None):
-        m = state["model"]
-        if comp.lower() == "water":
-            m.fs.unit.A_comp.fix(value)
+            p = m.fs.unit.inlet.flow_mol_phase_comp[0, phase, comp]
         else:
-            m.fs.unit.B_comp.fix(value)
+            raise RuntimeError(f"Unknown type for inlet flow: {type_}")
+        cls.set_unit_prop(p, **kwargs)
 
-    @staticmethod
-    def perm_pressure(state=None, value=None):
-        m = state["model"]
-        m.fs.unit.permeate.pressure[0].fix(value)
+    @classmethod
+    def set_inlet(cls, state=None, prop=None, **kwargs):
+        cls.set_unit_prop(getattr(state["model"].fs.unit.inlet, prop)[0], **kwargs)
+
+    @classmethod
+    def set_membrane_area(cls, state=None, **kwargs):
+        cls.set_unit_prop(state["model"].fs.unit.area, **kwargs)
+
+    @classmethod
+    def set_membrane_perm(cls, state=None, comp=None, **kwargs):
+        comp_attr = {"water": "A_comp", "salt": "B_comp"}[comp]
+        cls.set_unit_prop(getattr(state["model"].fs.unit, comp_attr), **kwargs)
+
+    @classmethod
+    def set_perm_pressure(cls, state=None, comp=None, **kwargs):
+        cls.set_unit_prop(state["model"].fs.unit.permeate.pressure[0], **kwargs)
 
     @staticmethod
     def scale_flow(state=None, type_=None, comp=None, value=None):
